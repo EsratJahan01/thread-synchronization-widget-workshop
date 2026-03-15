@@ -1,0 +1,195 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <unistd.h>
+#include <time.h>
+
+#define NUM_ENGINEERS 3
+#define NUM_WIDGETS   3
+#define NUM_RESOURCES 3
+
+
+#define DESIGN  0
+#define CODE    1
+#define TEST    2
+
+typedef struct {
+    int id;
+    char* name;
+} engineer_t;
+
+
+char* resource_names[NUM_RESOURCES] = {
+    "Design Assets",
+    "Coding Templates",
+    "Testing Tools"
+};
+
+char* engineer_names[NUM_ENGINEERS] = {
+    "Alice",
+    "Bob",
+    "Carol"
+};
+
+// One semaphore per resource (only 1 available)
+sem_t resource_sem[NUM_RESOURCES];
+
+// FIFO queues for fairness
+int waiting_queue[NUM_RESOURCES][NUM_ENGINEERS];
+int front[NUM_RESOURCES] = {0};
+int rear[NUM_RESOURCES]  = {0};
+
+// Mutex for queues and logging
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+
+void enqueue(int res, int eng) {
+    waiting_queue[res][rear[res]] = eng;
+    rear[res] = (rear[res] + 1) % NUM_ENGINEERS;
+}
+
+int dequeue(int res) {
+    if (front[res] == rear[res])
+        return -1;
+
+    int id = waiting_queue[res][front[res]];
+    front[res] = (front[res] + 1) % NUM_ENGINEERS;
+    return id;
+}
+
+
+//the threads requesting the resources
+void request_resource(int eng, int res) {
+    pthread_mutex_lock(&mutex);
+    printf("%s is requesting %s\n",
+           engineer_names[eng], resource_names[res]);
+    enqueue(res, eng);
+    pthread_mutex_unlock(&mutex);
+
+    //wait until it's engineer's turn
+    while (1) {
+        //wait for resource to be free -> wait until nobody is using this resource
+        sem_wait(&resource_sem[res]);
+
+        pthread_mutex_lock(&mutex);
+        int next = dequeue(res);
+
+        if (next == eng) {
+            printf("%s acquired %s\n",
+                   engineer_names[eng], resource_names[res]);
+            pthread_mutex_unlock(&mutex);
+            return;
+        }
+
+        // Not this engineer's turn
+        //we removed someone else so we put them back in front order (fairness)
+        enqueue(res, next);
+        pthread_mutex_unlock(&mutex);
+
+        sem_post(&resource_sem[res]);   //give this resource back
+        sleep(1);
+    }
+}
+
+void release_resource(int eng, int res) {
+    pthread_mutex_lock(&mutex);
+    printf("%s released %s\n",
+           engineer_names[eng], resource_names[res]);
+    pthread_mutex_unlock(&mutex);
+
+    sem_post(&resource_sem[res]);
+}
+
+
+
+
+void* engineer_thread(void* arg) {
+    engineer_t* e = (engineer_t*)arg;
+
+    for (int w = 0; w < NUM_WIDGETS; w++) {
+
+        // Randomly choose 1�2 resources
+        int need[NUM_RESOURCES] = {0};
+        int count = rand() % 2 + 1;
+
+        for (int i = 0; i < count; i++) {
+            int r;
+            do { r = rand() % NUM_RESOURCES; } while (need[r]);
+            need[r] = 1;
+        }
+
+        pthread_mutex_lock(&mutex);
+        printf("\n[WAITING] %s wants widget %d and needs:",
+               e->name, w + 1);
+        for (int r = 0; r < NUM_RESOURCES; r++)
+            if (need[r]) printf(" %s", resource_names[r]);
+        printf("\n");
+        pthread_mutex_unlock(&mutex);
+
+        // requesting for resources
+        for (int r = 0; r < NUM_RESOURCES; r++)
+            if (need[r]) request_resource(e->id, r);
+
+        // Our threads are working
+        pthread_mutex_lock(&mutex);
+        printf("[WORKING] %s is working on widget %d\n",
+               e->name, w + 1);
+        pthread_mutex_unlock(&mutex);
+
+        sleep(rand() % 3 + 1);
+
+        pthread_mutex_lock(&mutex);
+        printf("[DONE] %s finished widget %d\n",
+               e->name, w + 1);
+        pthread_mutex_unlock(&mutex);
+
+        // Release the resources
+        for (int r = 0; r < NUM_RESOURCES; r++)
+            if (need[r]) release_resource(e->id, r);
+
+        sleep(1);
+    }
+
+    return NULL;
+}
+
+
+
+
+int main() {
+    srand(time(NULL));
+    pthread_t threads[NUM_ENGINEERS];
+
+    engineer_t engineers[NUM_ENGINEERS] = {
+        {0, "Alice"},
+        {1, "Bob"},
+        {2, "Carol"}
+    };
+
+    // Initializing semaphores
+    for (int i = 0; i < NUM_RESOURCES; i++)
+        sem_init(&resource_sem[i], 0, 1);
+
+    printf("============================================\n");
+    printf("  WHIMSICAL WIDGET WORKSHOP OPENED\n");
+    printf("============================================\n");
+
+    // Creating engineer threads
+    for (int i = 0; i < NUM_ENGINEERS; i++)
+        pthread_create(&threads[i], NULL, engineer_thread, &engineers[i]);
+
+    // Waiting for all engineers
+    for (int i = 0; i < NUM_ENGINEERS; i++)
+        pthread_join(threads[i], NULL);
+
+    // Cleaning
+    for (int i = 0; i < NUM_RESOURCES; i++)
+        sem_destroy(&resource_sem[i]);
+
+    printf("\n============================================\n");
+    printf("  ALL WIDGETS COMPLETED � WORKSHOP CLOSED\n");
+    printf("============================================\n");
+
+    return 0;
+}
